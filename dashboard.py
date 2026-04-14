@@ -27,7 +27,22 @@ st.set_page_config(
     layout="wide",
 )
 
-IS_STANDALONE = os.getenv("STANDALONE", "false").lower() == "true" or settings.standalone
+def _mock_servers_reachable() -> bool:
+    """Quick TCP check — if mock servers aren't up, fall back to standalone."""
+    import socket
+    for port in (settings.toast_mock_port, settings.opentable_mock_port):
+        try:
+            with socket.create_connection(("localhost", port), timeout=1):
+                pass
+        except OSError:
+            return False
+    return True
+
+IS_STANDALONE = (
+    os.getenv("STANDALONE", "false").lower() == "true"
+    or settings.standalone
+    or not _mock_servers_reachable()
+)
 
 st.title("FOH Intel — Development Dashboard")
 env_note = "STANDALONE (demo)" if IS_STANDALONE else env_label()

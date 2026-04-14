@@ -12,7 +12,7 @@ import asyncio
 import os
 import pandas as pd
 import streamlit as st
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from foh.providers.factory import get_pos_provider, get_reservation_provider, env_label
 from foh.config import settings
 
@@ -69,22 +69,77 @@ os.environ["DATA_MODE"] = mode_override
 
 
 # ---------------------------------------------------------------------------
+# Simulator — time scrubber for live mode testing
+# ---------------------------------------------------------------------------
+
+SERVICE_START_HOUR = 17   # 5:00 PM
+SERVICE_END_HOUR   = 23   # 11:00 PM
+STEP_MINUTES       = 15
+TOTAL_STEPS        = (SERVICE_END_HOUR - SERVICE_START_HOUR) * 60 // STEP_MINUTES  # 24
+
+with st.expander("Runtime Simulator", expanded=(mode_override == "live")):
+    sim_col1, sim_col2 = st.columns([1, 3])
+    with sim_col1:
+        sim_mode = st.radio(
+            "Time Source",
+            ["Live (now)", "Simulated"],
+            index=0,
+            help="Simulated: scrub through service to any point in time",
+        )
+    with sim_col2:
+        sim_step = st.slider(
+            "Simulated Time",
+            min_value=0,
+            max_value=TOTAL_STEPS,
+            value=TOTAL_STEPS // 2,
+            step=1,
+            format="%d",
+            disabled=(sim_mode == "Live (now)"),
+            help="Drag to move through service (5 PM → 11 PM, 15-min steps)",
+        )
+        # Build a readable label for the slider position
+        sim_offset_min = sim_step * STEP_MINUTES
+        sim_hour = SERVICE_START_HOUR + sim_offset_min // 60
+        sim_min  = sim_offset_min % 60
+        sim_label_hour = sim_hour if sim_hour <= 12 else sim_hour - 12
+        sim_label_ampm = "PM" if sim_hour < 24 else "AM"
+        st.caption(f"Simulated time: **{sim_label_hour}:{sim_min:02d} {sim_label_ampm}**")
+
+# Resolve sim_time
+if sim_mode == "Simulated":
+    sim_time: datetime | None = datetime(
+        selected_date.year, selected_date.month, selected_date.day,
+        tzinfo=timezone.utc,
+    ) + timedelta(hours=SERVICE_START_HOUR, minutes=sim_step * STEP_MINUTES)
+    st.info(
+        f"Simulating floor state at **{sim_label_hour}:{sim_min:02d} {sim_label_ampm}** "
+        f"on {selected_date.strftime('%b %d, %Y')} — data frozen at this moment."
+    )
+else:
+    sim_time = None
+
+
+# ---------------------------------------------------------------------------
 # Data loading — two paths: standalone (in-process) or HTTP providers
 # ---------------------------------------------------------------------------
 
-def _standalone_load(date_str: str, mode: str):
+def _standalone_load(date_str: str, mode: str, sim_time_iso: str | None):
     """
     Generate data entirely in-process using the mock data generators.
     No HTTP servers required — safe for Streamlit Community Cloud.
+    sim_time_iso is an ISO string (or None) so it's hashable for @st.cache_data.
     """
     from mock_servers.toast.data import (
-        generate_employees, generate_shifts, generate_orders, EMPLOYEES
+        generate_employees, generate_shifts, generate_orders,
     )
-    from mock_servers.opentable.data import generate_reservations, generate_guest
-    from foh.models.pos import Server, Check, Shift, OrderStatus, PaymentMethod
-    from foh.models.reservations import Reservation, ReservationStatus, DiningPreference, Guest
+    from mock_servers.opentable.data import generate_reservations
+    from foh.models.pos import Server, Check, Shift, OrderStatus
+    from foh.models.reservations import Reservation, ReservationStatus, DiningPreference
     from decimal import Decimal
 
+    sim_time = (
+        datetime.fromisoformat(sim_time_iso) if sim_time_iso else None
+    )
     date = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
     # Employees → Server models
@@ -100,7 +155,7 @@ def _standalone_load(date_str: str, mode: str):
     ]
 
     # Shifts
-    raw_shifts = generate_shifts(date, mode)
+    raw_shifts = generate_shifts(date, mode, sim_time=sim_time)
     shifts = [
         Shift(
             provider_id=s["guid"],
@@ -114,10 +169,9 @@ def _standalone_load(date_str: str, mode: str):
     ]
 
     # Orders → Checks
-    from datetime import timedelta
     start = date
     end   = date.replace(hour=23, minute=59, second=59)
-    raw_orders = generate_orders(start, end, mode)
+    raw_orders = generate_orders(start, end, mode, sim_time=sim_time)
     checks = []
     for order in raw_orders:
         for chk in order.get("checks", []):
@@ -148,7 +202,7 @@ def _standalone_load(date_str: str, mode: str):
         "booked": ReservationStatus.BOOKED, "seated": ReservationStatus.SEATED,
         "completed": ReservationStatus.COMPLETED, "no_show": ReservationStatus.NO_SHOW,
     }
-    raw_res = generate_reservations(date, mode)
+    raw_res = generate_reservations(date, mode, sim_time=sim_time)
     reservations = [
         Reservation(
             provider_id=r["id"],
@@ -171,10 +225,10 @@ def _standalone_load(date_str: str, mode: str):
 
 
 @st.cache_data(ttl=15, show_spinner=False)
-def load_data(date_str: str, mode: str, env: str, standalone: bool):
+def load_data(date_str: str, mode: str, env: str, standalone: bool, sim_time_iso: str | None):
     """Cached 15s — auto-refreshes in live mode to reflect floor changes."""
     if standalone:
-        return _standalone_load(date_str, mode)
+        return _standalone_load(date_str, mode, sim_time_iso)
 
     date = datetime.strptime(date_str, "%Y-%m-%d")
 
@@ -193,6 +247,8 @@ def load_data(date_str: str, mode: str, env: str, standalone: bool):
     return asyncio.run(_fetch())
 
 
+sim_time_iso = sim_time.isoformat() if sim_time else None
+
 with st.spinner("Fetching data..."):
     try:
         servers, checks, shifts, reservations = load_data(
@@ -200,6 +256,7 @@ with st.spinner("Fetching data..."):
             mode_override,
             env_label(),
             IS_STANDALONE,
+            sim_time_iso,
         )
     except Exception as e:
         st.error(f"Pipeline error: {e}")
@@ -331,10 +388,10 @@ if shifts:
     shift_rows = []
     for sh in shifts:
         shift_rows.append({
-            "Server":   server_map.get(sh.server_id, sh.server_id),
+            "Server":    server_map.get(sh.server_id, sh.server_id),
             "Clock In":  sh.clock_in.strftime("%I:%M %p"),
             "Clock Out": sh.clock_out.strftime("%I:%M %p") if sh.clock_out else "On floor",
-            "Status":   "Active" if not sh.clock_out else "Clocked out",
+            "Status":    "Active" if not sh.clock_out else "Clocked out",
         })
     df_shifts = pd.DataFrame(shift_rows)
     st.dataframe(df_shifts, use_container_width=True, hide_index=True)
@@ -343,12 +400,118 @@ else:
 
 
 # ---------------------------------------------------------------------------
+# Section 4: Scoring Engine — Server Profiles & Seating Recommendations
+# ---------------------------------------------------------------------------
+
+st.divider()
+st.subheader("Scoring Engine")
+
+from foh.scoring.engine import build_profiles, recommend, DEFAULT_WEIGHTS
+
+profiles = build_profiles(servers, checks, shifts)
+
+if profiles:
+    # --- Server score cards ---
+    st.markdown("**Server Performance Scores** *(normalized within active pool)*")
+
+    profiles_sorted = sorted(profiles, key=lambda p: p.performance_score, reverse=True)
+    server_map = {s.provider_id: s.name for s in servers}
+
+    score_rows = []
+    for p in profiles_sorted:
+        score_rows.append({
+            "Server":       p.server.name,
+            "Score":        p.performance_score,
+            "Tables Done":  p.check_count,
+            "Open Tables":  p.open_tables,
+            "Open Covers":  p.open_covers,
+            "Avg Tip %":    round(p.avg_tip_pct, 1),
+            "Avg Turn":     f"{p.avg_turn_minutes:.0f} min" if p.avg_turn_minutes else "—",
+            "Rev/Cover":    f"${p.avg_revenue_cover:.2f}" if p.avg_revenue_cover else "—",
+        })
+    df_scores = pd.DataFrame(score_rows)
+
+    st.dataframe(
+        df_scores,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Score": st.column_config.ProgressColumn(
+                "Score",
+                help="Composite performance score (0–1)",
+                min_value=0.0,
+                max_value=1.0,
+                format="%.2f",
+            ),
+        },
+    )
+
+    # --- Seating recommendations for upcoming parties ---
+    st.markdown("**Seating Recommendations** *(next parties in queue)*")
+
+    upcoming_res = [r for r in reservations if r.status.value == "booked"]
+
+    if upcoming_res:
+        # Show recommendations for the next 5 upcoming reservations
+        for res in upcoming_res[:5]:
+            suggestions = recommend(res, profiles, top_n=3)
+            vip_badge = " ★ VIP" if res.is_vip else ""
+            with st.container():
+                st.markdown(
+                    f"**{res.guest_name}** · Party of {res.party_size}"
+                    f" · {res.scheduled_at.strftime('%I:%M %p')}{vip_badge}"
+                )
+                if res.notes:
+                    st.caption(f"Note: {res.notes}")
+                rec_cols = st.columns(min(len(suggestions), 3))
+                for col, sug in zip(rec_cols, suggestions):
+                    with col:
+                        medal = ["🥇", "🥈", "🥉"][sug.rank - 1]
+                        st.metric(
+                            label=f"{medal} {sug.server.name}",
+                            value=f"{sug.match_score:.0%}",
+                        )
+                        for line in sug.reasoning:
+                            st.caption(f"• {line}")
+                st.divider()
+    else:
+        st.info("No upcoming reservations to recommend for.")
+
+    # --- Floor snapshot — open tables right now ---
+    open_checks = [c for c in checks if not c.closed_at]
+    if open_checks:
+        st.markdown("**Floor Snapshot** *(currently open tables)*")
+        floor_rows = []
+        server_map_pid = {s.provider_id: s.name for s in servers}
+        for c in open_checks:
+            elapsed = (
+                int(((sim_time or datetime.now(timezone.utc)) - c.opened_at).total_seconds() / 60)
+                if c.opened_at else "—"
+            )
+            floor_rows.append({
+                "Server":        server_map_pid.get(c.server_id, c.server_id),
+                "Table":         c.table_id or "—",
+                "Covers":        c.covers,
+                "Open (min)":    elapsed,
+                "Subtotal":      f"${float(c.subtotal):.2f}" if c.subtotal else "—",
+            })
+        df_floor = pd.DataFrame(floor_rows).sort_values("Server")
+        st.dataframe(df_floor, use_container_width=True, hide_index=True)
+else:
+    st.info("Not enough shift/check data to build server profiles yet.")
+
+
+# ---------------------------------------------------------------------------
 # Footer
 # ---------------------------------------------------------------------------
 
 st.divider()
+time_label = (
+    f"Simulated {sim_label_hour}:{sim_min:02d} {sim_label_ampm}"
+    if sim_time else datetime.now().strftime("%I:%M:%S %p")
+)
 st.caption(
-    f"Data pulled at {datetime.now().strftime('%I:%M:%S %p')} · "
+    f"Data at {time_label} · "
     f"Servers: {len(servers)} · "
     f"Mock servers: Toast :8001 · OpenTable :8002"
 )

@@ -65,9 +65,13 @@ def _service_anchor(date: datetime) -> datetime:
     return date.replace(hour=17, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
 
 
-def generate_reservations(date: datetime, mode: str) -> list[dict]:
+def generate_reservations(
+    date: datetime,
+    mode: str,
+    sim_time: datetime | None = None,
+) -> list[dict]:
     rng  = random.Random(date.toordinal() + 7)
-    now  = datetime.now(timezone.utc)
+    now  = sim_time or datetime.now(timezone.utc)
     svc  = _service_anchor(date)
     is_today = date.date() == now.date()
 

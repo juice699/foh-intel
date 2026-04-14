@@ -16,6 +16,100 @@ from datetime import datetime, timezone, timedelta
 
 JOB_GUID = "job-0001-server"
 
+# ---------------------------------------------------------------------------
+# Menu — stable item catalog
+# ---------------------------------------------------------------------------
+
+MENU_ITEMS = [
+    # Drinks
+    {"id": "MI-K01", "name": "Sparkling Water",     "category": "drink",     "price": 6.00,  "upsell": False},
+    {"id": "MI-K02", "name": "House Wine Glass",     "category": "drink",     "price": 12.00, "upsell": False},
+    {"id": "MI-K03", "name": "Craft Cocktail",       "category": "drink",     "price": 17.00, "upsell": True},
+    {"id": "MI-K04", "name": "Bottle of Wine",       "category": "drink",     "price": 65.00, "upsell": True},
+    {"id": "MI-K05", "name": "Coffee / Espresso",    "category": "drink",     "price": 5.00,  "upsell": False},
+    # Appetizers
+    {"id": "MI-A01", "name": "Soup of the Day",      "category": "appetizer", "price": 9.00,  "upsell": False},
+    {"id": "MI-A02", "name": "Caesar Salad",         "category": "appetizer", "price": 12.00, "upsell": False},
+    {"id": "MI-A03", "name": "Shrimp Cocktail",      "category": "appetizer", "price": 18.00, "upsell": True},
+    {"id": "MI-A04", "name": "Charcuterie Board",    "category": "appetizer", "price": 24.00, "upsell": True},
+    # Entrees
+    {"id": "MI-E01", "name": "Chicken Marsala",      "category": "entree",    "price": 28.00, "upsell": False},
+    {"id": "MI-E02", "name": "Vegetable Risotto",    "category": "entree",    "price": 26.00, "upsell": False},
+    {"id": "MI-E03", "name": "Pan-Seared Salmon",    "category": "entree",    "price": 34.00, "upsell": False},
+    {"id": "MI-E04", "name": "Lobster Ravioli",      "category": "entree",    "price": 38.00, "upsell": True},
+    {"id": "MI-E05", "name": "NY Strip 12oz",        "category": "entree",    "price": 46.00, "upsell": True},
+    {"id": "MI-E06", "name": "Filet Mignon 8oz",     "category": "entree",    "price": 58.00, "upsell": True},
+    # Desserts
+    {"id": "MI-D01", "name": "Seasonal Sorbet",      "category": "dessert",   "price": 9.00,  "upsell": False},
+    {"id": "MI-D02", "name": "Crème Brûlée",         "category": "dessert",   "price": 12.00, "upsell": True},
+    {"id": "MI-D03", "name": "Chocolate Lava Cake",  "category": "dessert",   "price": 14.00, "upsell": True},
+]
+
+_ITEMS_BY_CAT: dict[str, list[dict]] = {}
+for _item in MENU_ITEMS:
+    _ITEMS_BY_CAT.setdefault(_item["category"], []).append(_item)
+
+
+def generate_order_items(
+    rng: random.Random,
+    covers: int,
+    opened: datetime,
+) -> list[dict]:
+    """
+    Generate realistic menu item fire times for a single check.
+    Items are tagged with sentAt timestamps so callers can filter by sim_time.
+      - Drinks:      ordered 2-5 min after seating
+      - Appetizers:  40 % of tables, ordered 8-15 min in
+      - Entrees:     everyone, ordered 15-25 min in
+      - Desserts:    35 % of tables, ordered 50-70 min in
+    """
+    items = []
+    _ts = lambda offset: (opened + offset).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    # Drinks
+    drink_off = timedelta(minutes=rng.randint(2, 5))
+    for _ in range(covers):
+        d = rng.choice(_ITEMS_BY_CAT["drink"])
+        items.append({
+            "menuItemId": d["id"], "name": d["name"], "category": "drink",
+            "quantity": 1, "unitPrice": d["price"],
+            "sentAt": _ts(drink_off), "isUpsell": d["upsell"],
+        })
+
+    # Appetizers (shared)
+    if rng.random() < 0.40:
+        app_off = timedelta(minutes=rng.randint(8, 15))
+        for _ in range(rng.randint(1, max(1, covers // 2))):
+            a = rng.choice(_ITEMS_BY_CAT["appetizer"])
+            items.append({
+                "menuItemId": a["id"], "name": a["name"], "category": "appetizer",
+                "quantity": 1, "unitPrice": a["price"],
+                "sentAt": _ts(app_off), "isUpsell": a["upsell"],
+            })
+
+    # Entrees
+    entree_off = timedelta(minutes=rng.randint(15, 25))
+    for _ in range(covers):
+        e = rng.choice(_ITEMS_BY_CAT["entree"])
+        items.append({
+            "menuItemId": e["id"], "name": e["name"], "category": "entree",
+            "quantity": 1, "unitPrice": e["price"],
+            "sentAt": _ts(entree_off), "isUpsell": e["upsell"],
+        })
+
+    # Desserts (shared)
+    if rng.random() < 0.35:
+        dessert_off = timedelta(minutes=rng.randint(50, 70))
+        for _ in range(rng.randint(1, max(1, covers // 2))):
+            ds = rng.choice(_ITEMS_BY_CAT["dessert"])
+            items.append({
+                "menuItemId": ds["id"], "name": ds["name"], "category": "dessert",
+                "quantity": 1, "unitPrice": ds["price"],
+                "sentAt": _ts(dessert_off), "isUpsell": ds["upsell"],
+            })
+
+    return items
+
 EMPLOYEES = [
     {"guid": "emp-0001", "firstName": "Jordan",  "lastName": "Hayes"},
     {"guid": "emp-0002", "firstName": "Maria",   "lastName": "Santos"},
@@ -100,6 +194,7 @@ def check_object(
         pmt = payment_object(rng, subtotal)
         pmt["paidDate"] = closed.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         payments = [pmt]
+    items = generate_order_items(rng, covers, opened)
     return {
         "guid":          check_guid,
         "entityType":    "Check",
@@ -112,6 +207,7 @@ def check_object(
         "paymentStatus": "CLOSED" if closed else "OPEN",
         "duration":      int((closed - opened).total_seconds()) if closed else None,
         "payments":      payments,
+        "items":         items,
         "deleted":       False,
     }, covers
 
@@ -177,30 +273,41 @@ def generate_employees() -> list[dict]:
     return [employee_object(e) for e in EMPLOYEES]
 
 
-def generate_shifts(date: datetime, mode: str) -> list[dict]:
+def generate_shifts(
+    date: datetime,
+    mode: str,
+    sim_time: datetime | None = None,
+) -> list[dict]:
     rng = random.Random(date.toordinal())
     service_start = _service_anchor(date)
-    now = datetime.now(timezone.utc)
+    now = sim_time or datetime.now(timezone.utc)
     shifts = []
 
     for emp in EMPLOYEES:
         clock_in = service_start + timedelta(minutes=rng.randint(-20, 10))
-        if mode == "live" and date.date() == now.date():
-            clock_out = None   # still on shift
+        clock_out_candidate = service_start + timedelta(hours=rng.uniform(5.5, 7.5))
+        if mode == "live":
+            # Still on shift if sim/real time hasn't passed their clock-out
+            clock_out = None if now < clock_out_candidate else clock_out_candidate
         else:
-            clock_out = service_start + timedelta(hours=rng.uniform(5.5, 7.5))
+            clock_out = clock_out_candidate
         shifts.append(shift_object(emp["guid"], clock_in, clock_out))
 
     return shifts
 
 
-def generate_orders(start: datetime, end: datetime, mode: str) -> list[dict]:
+def generate_orders(
+    start: datetime,
+    end: datetime,
+    mode: str,
+    sim_time: datetime | None = None,
+) -> list[dict]:
     date = start.date()
     rng = random.Random(date.toordinal() + 1)
     service_start = _service_anchor(
         datetime(date.year, date.month, date.day)
     )
-    now = datetime.now(timezone.utc)
+    now = sim_time or datetime.now(timezone.utc)
 
     emp_guids = [e["guid"] for e in EMPLOYEES]
     tbl_guids = [t["guid"] for t in TABLES]
@@ -218,25 +325,21 @@ def generate_orders(start: datetime, end: datetime, mode: str) -> list[dict]:
         server_guid = rng.choice(emp_guids)
         table_guid = rng.choice(server_tables[server_guid])
 
-        # Stagger seatings across the service window (5pm – 9:30pm)
         offset = timedelta(minutes=rng.randint(0, 270))
         opened = service_start + offset
         turn_time = timedelta(minutes=rng.randint(38, 95))
         closed_candidate = opened + turn_time
 
-        if mode == "live" and date == now.date():
-            # Orders closed more than 10 min ago are settled
-            # Orders still within their turn time stay open
+        if mode == "live":
             if closed_candidate <= now - timedelta(minutes=10):
                 closed = closed_candidate
             elif opened > now:
-                continue   # hasn't been seated yet — don't include
+                continue   # not seated yet at sim_time
             else:
                 closed = None
         else:
             closed = closed_candidate
 
-        # Only include if it falls within the requested window
         if opened < start or opened >= end:
             continue
 

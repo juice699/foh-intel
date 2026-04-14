@@ -1,3 +1,4 @@
+from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -16,6 +17,16 @@ class PaymentMethod(str, Enum):
     CASH = "cash"
     GIFT_CARD = "gift_card"
     OTHER = "other"
+
+
+class OrderItem(BaseModel):
+    """A single fired menu item on a check."""
+    name:     str
+    category: str          # "drink" | "appetizer" | "entree" | "dessert"
+    quantity: int  = 1
+    price:    Decimal
+    sent_at:  datetime     # When sent to kitchen / recorded in POS
+    is_upsell: bool = False
 
 
 class Server(BaseModel):
@@ -40,6 +51,7 @@ class Check(BaseModel):
     tip: Optional[Decimal] = None
     payment_method: Optional[PaymentMethod] = None
     status: OrderStatus = OrderStatus.OPEN
+    items: list[OrderItem] = []
 
     @property
     def turn_time_minutes(self) -> Optional[float]:
